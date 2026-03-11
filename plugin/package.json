@@ -1,0 +1,19 @@
+{
+  "name": "@openclaw/salute",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "openclaw": {
+    "extensions": ["./index.ts"],
+    "channel": {
+      "id": "salute",
+      "label": "Salute",
+      "selectionLabel": "Salute (SmartApp API)",
+      "docsPath": "/channels/salute",
+      "docsLabel": "salute",
+      "blurb": "Salute voice assistant channel via SmartApp API webhook.",
+      "order": 80,
+      "aliases": ["salute"]
+    }
+  }
+}

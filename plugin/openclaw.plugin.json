@@ -1,0 +1,10 @@
+{
+  "id": "salute",
+  "name": "Salute Channel",
+  "channels": ["salute"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
