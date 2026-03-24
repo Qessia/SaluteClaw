@@ -3,8 +3,17 @@
   "version": "0.1.0",
   "type": "module",
   "private": true,
+  "peerDependencies": {
+    "openclaw": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
   "openclaw": {
     "extensions": ["./index.ts"],
+    "setupEntry": "./setup-entry.ts",
     "channel": {
       "id": "salute",
       "label": "Salute",

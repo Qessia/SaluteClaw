@@ -151,3 +151,86 @@ export interface SaluteAccountConfig {
   webhookPath?: string;
   publicBaseUrl?: string;
 }
+
+// ---------------------------------------------------------------------------
+// OpenClaw plugin API surface (hand-rolled to avoid SDK dependency at dev time)
+// ---------------------------------------------------------------------------
+
+export interface PluginLogger {
+  debug: (...args: unknown[]) => void;
+  info: (...args: unknown[]) => void;
+  warn: (...args: unknown[]) => void;
+  error: (...args: unknown[]) => void;
+}
+
+export interface SubagentRunResult {
+  status: string;
+  output?: string;
+  [key: string]: unknown;
+}
+
+export interface SessionMessage {
+  role: string;
+  content?: string;
+  [key: string]: unknown;
+}
+
+export interface PluginRuntime {
+  agent: {
+    resolveAgentDir(cfg: Record<string, unknown>): string;
+    resolveAgentWorkspaceDir(cfg: Record<string, unknown>): string;
+    resolveAgentTimeoutMs(cfg: Record<string, unknown>): number;
+    ensureAgentWorkspace(cfg: Record<string, unknown>): Promise<void>;
+    runEmbeddedPiAgent(opts: {
+      sessionId: string;
+      runId: string;
+      sessionFile: string;
+      workspaceDir: string;
+      prompt: string;
+      timeoutMs: number;
+      provider?: string;
+      model?: string;
+      authProfileId?: string;
+      fastMode?: boolean;
+      disableTools?: boolean;
+      bootstrapContextMode?: "full" | "lightweight";
+      extraSystemPrompt?: string;
+    }): Promise<Record<string, unknown>>;
+  };
+  subagent: {
+    run(opts: {
+      sessionKey: string;
+      message: string;
+      deliver?: boolean;
+      provider?: string;
+      model?: string;
+    }): Promise<{ runId: string }>;
+    waitForRun(opts: {
+      runId: string;
+      timeoutMs?: number;
+    }): Promise<SubagentRunResult>;
+    getSessionMessages(opts: {
+      sessionKey: string;
+      limit?: number;
+    }): Promise<{ messages: SessionMessage[] }>;
+    deleteSession(opts: { sessionKey: string }): Promise<void>;
+  };
+  config: {
+    loadConfig(): Promise<Record<string, unknown>>;
+  };
+  [key: string]: unknown;
+}
+
+export interface PluginApi {
+  registerChannel: (opts: { plugin: unknown }) => void;
+  registerHttpRoute: (opts: {
+    path: string;
+    auth: string;
+    match?: string;
+    handler: (req: unknown, res: unknown) => Promise<boolean>;
+  }) => void;
+  logger: PluginLogger;
+  config: Record<string, unknown>;
+  runtime: PluginRuntime;
+  registrationMode?: "full" | "setup-only" | "setup-runtime";
+}
