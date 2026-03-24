@@ -12,7 +12,9 @@
     }
   },
   "openclaw": {
-    "extensions": ["./index.ts"],
+    "extensions": [
+      "./index.ts"
+    ],
     "setupEntry": "./setup-entry.ts",
     "channel": {
       "id": "salute",
@@ -22,7 +24,13 @@
       "docsLabel": "salute",
       "blurb": "Salute voice assistant channel via SmartApp API webhook.",
       "order": 80,
-      "aliases": ["salute"]
+      "aliases": [
+        "salute"
+      ]
     }
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "typescript": "^6.0.2"
   }
 }

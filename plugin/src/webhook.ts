@@ -6,6 +6,12 @@ import {
   buildAnswerResponse,
   buildErrorResponse,
 } from "./outbound.js";
+import {
+  cacheKey,
+  consumeCachedResult,
+  evictSession,
+} from "./cache.js";
+import { startBackgroundAgentRun } from "./runtime.js";
 
 interface WebhookDeps {
   logger: PluginLogger;
@@ -36,8 +42,8 @@ function readNodeRequestBody(
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
 
-    const onData = (chunk: Buffer | string) => {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const onData = (chunk: unknown) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
     };
     const onEnd = () => resolve(Buffer.concat(chunks).toString("utf8"));
     const onError = (err: unknown) => reject(err);
@@ -184,9 +190,13 @@ export function createWebhookHandler(accountId: string, deps: WebhookDeps) {
           response = buildGreetingResponse(raw);
           break;
 
-        case "close":
+        case "close": {
+          const closeKey = cacheKey(accountId, envelope.sessionId);
+          evictSession(closeKey);
+          deps.logger.info(`[salute] session closed, evicted cache for ${closeKey}`);
           response = buildGoodbyeResponse(raw);
           break;
+        }
 
         case "message":
         case "action": {
@@ -198,17 +208,34 @@ export function createWebhookHandler(accountId: string, deps: WebhookDeps) {
             break;
           }
 
+          const key = cacheKey(accountId, envelope.sessionId);
+          const cached = consumeCachedResult(key);
+
           if (deps.handleMessage) {
-            const reply = await withTimeout(
+            if (cached) {
+              deps.logger.info(
+                `[salute] delivering cached background result for ${key} (age ${Date.now() - cached.timestamp}ms)`,
+              );
+            }
+
+            const fastReply = await withTimeout(
               deps.handleMessage(envelope),
               REQUEST_TIMEOUT_MS,
               `salute:handleMessage:${accountId}`,
             );
-            response = buildAnswerResponse(
-              raw,
-              reply ?? "Не удалось получить ответ.",
-              { autoListening: true },
-            );
+
+            let replyText: string;
+            if (cached && fastReply) {
+              replyText = `${cached.text}\n\n---\n\n${fastReply}`;
+            } else if (cached) {
+              replyText = cached.text;
+            } else {
+              replyText = fastReply ?? "Не удалось получить ответ.";
+            }
+
+            response = buildAnswerResponse(raw, replyText, { autoListening: true });
+
+            startBackgroundAgentRun(envelope);
           } else {
             deps.logger.warn("[salute] handleMessage not wired — returning echo stub");
             response = buildAnswerResponse(
