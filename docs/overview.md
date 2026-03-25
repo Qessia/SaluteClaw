@@ -1,99 +1,72 @@
 # SaluteClaw Overview
 
 ## Purpose
-`SaluteClaw` is a proof of concept that connects a Salute SmartApp to an existing personal OpenClaw server.
+`SaluteClaw` connects a Salute `Chat App` (scenario type `SmartApp API`) to a personal OpenClaw server through a standalone `salute` plugin.
 
-The project goal is to let a user speak or type through Salute, send that request to OpenClaw, and return a Salute-compatible response.
+User voice/text is sent to the SmartApp webhook, normalized by the plugin, forwarded to OpenClaw runtime, and mapped back into Salute-compatible JSON for voice and screen output.
 
-## Current Assumptions
-- The personal OpenClaw server already exists.
-- The OpenClaw server can be configured manually.
-- The Salute side will use a `Chat App` with `SmartApp API`.
-- This repository should contain all code and docs for the PoC integration.
-- Manual setup is acceptable for the first milestone.
+## Current Status
+The integration is implemented and running in plugin form:
 
-## Main Decision
-Implement a standalone OpenClaw plugin in this repository, then load it into the personal OpenClaw server.
+- standalone plugin in `plugin/` loaded by OpenClaw
+- webhook endpoint `/salute/webhook`
+- inbound support for `RUN_APP`, `MESSAGE_TO_SKILL`, `SERVER_ACTION`, `CLOSE_APP`
+- Salute response builders for greeting, answer, goodbye, and error fallbacks
+- text sanitization + truncation for voice-first UX
+- two-phase async model for tool-enabled responses under Salute timeout limits
 
-This keeps the project self-contained and avoids modifying OpenClaw core for the first milestone.
+## Core Decisions
+- Salute side: `Chat App` + `SmartApp API`
+- Runtime host: existing personal OpenClaw server (no OpenClaw core changes)
+- Plugin model: local `salute` channel plugin loaded from this repo
+- Response strategy: fast LLM-only reply immediately, richer tool-enabled result on next turn
 
-## Why `SmartApp API`
-`SmartApp API` is the shortest path to a working integration because:
-- Salute can call an external HTTPS webhook directly.
-- OpenClaw remains the main orchestration runtime.
-- The Salute-specific layer stays thin and adapter-focused.
-- We avoid re-implementing assistant logic in Salute `Code`.
+## Why Two-Phase Async
+Salute SmartApp API webhook handling is synchronous with a strict response window. Tool-enabled OpenClaw runs can exceed that limit.
 
-`Code` is still a future option, but it is not the preferred PoC path.
+Current behavior:
+1. Incoming message gets an immediate fast reply (`disableTools: true`).
+2. In parallel, a background full-agent run starts (`disableTools: false`).
+3. On the next user turn, cached background text (if ready) is prepended before the new fast reply.
 
-## Scope
-The PoC only needs to prove:
-
-1. Salute can send a request to the integration.
-2. The integration can normalize the request for OpenClaw.
-3. OpenClaw can generate an answer.
-4. The integration can convert that answer into valid Salute response JSON.
-
-## Non-Goals
-The first version does not need:
-- production deployment polish
-- catalog publication readiness
-- advanced moderation policy
-- multi-account support beyond `default`
-- media or rich cards
-- upstream contribution readiness
+This introduces a one-message delay for richer, tool-based answers while keeping webhook latency low.
 
 ## Repository Responsibilities
-This repo should contain:
-- the OpenClaw `salute` plugin source
-- SmartApp request and response mapping logic
-- configuration examples
-- fixtures for Salute payloads
-- setup notes for OpenClaw
-- setup notes for Salute Studio
+This repo contains:
 
-## Proposed Repository Shape
+- source for the OpenClaw `salute` plugin
+- Salute inbound/outbound mapping logic
+- runtime handoff and background result cache
+- payload fixtures in `fixtures/salute/`
+- setup docs for OpenClaw and Salute Studio
+
+## Plugin Layout
 ```text
-.
-  README.md
-  SPEC.md
-  docs/
-    overview.md
-    architecture.md
-    setup-openclaw.md
-    setup-salute.md
-    poc-plan.md
-  plugin/
-    package.json
-    openclaw.plugin.json
-    index.ts
-    src/
-      channel.ts
-      config.ts
-      webhook.ts
-      inbound.ts
-      outbound.ts
-      mapper.ts
-      types.ts
-  fixtures/
-    salute/
-      launch.json
-      message.json
-      action.json
-      close.json
+plugin/
+  package.json
+  openclaw.plugin.json
+  index.ts
+  setup-entry.ts
+  src/
+    channel.ts
+    config.ts
+    webhook.ts
+    inbound.ts
+    outbound.ts
+    mapper.ts
+    runtime.ts
+    cache.ts
+    types.ts
 ```
 
-## Current Recommendation
-Build a narrow text-first bridge first:
-
-1. standalone `salute` plugin in this repo
-2. loaded by the personal OpenClaw server
-3. Salute `Chat App` using `SmartApp API`
-4. short text and voice-safe responses
-
-That is the fastest route to an end-to-end demo.
+## Non-Goals (Current PoC)
+- rich media/cards beyond simple text bubble + optional suggestions
+- push delivery of async results into the same active session
+- catalog/publication hardening
+- advanced policy/moderation flows
 
 ## References
 - OpenClaw plugin docs: https://docs.openclaw.ai/tools/plugin
 - Salute Chat App setup: https://developers.sber.ru/docs/ru/va/chat/step-by-step/setup
-- Salute Code overview: https://developers.sber.ru/docs/ru/va/code/overview
+- Salute SmartApp API overview: https://developers.sber.ru/docs/ru/va/api/overview
+- Project spec: `SPEC.md`

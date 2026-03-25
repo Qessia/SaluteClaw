@@ -1,36 +1,35 @@
-# OpenClaw Setup Notes
+# OpenClaw Setup
 
 ## Goal
-Load the `salute` plugin from this repository into the existing personal OpenClaw server.
+Run the `salute` plugin from this repository on a personal OpenClaw server and expose a reachable Salute webhook.
 
-## Preferred Approach
-Use a local plugin path during development so the server loads code directly from this repo.
-
-Expected options:
-- add this repo's `plugin/` directory to `plugins.load.paths`, or
-- install/link the local plugin into the personal OpenClaw environment
-
-The exact method depends on how the personal OpenClaw server is currently configured.
-
-## Expected Plugin Location
-The implementation should live in:
+## 1) Plugin Files
+Expected plugin entry files:
 
 ```text
 plugin/
   package.json
   openclaw.plugin.json
   index.ts
+  setup-entry.ts
 ```
 
-## Expected Config Shape
-Minimal runtime config target:
+Main runtime modules live under `plugin/src/`.
+
+## 2) OpenClaw Config
+Add/verify the following in `~/.openclaw/openclaw.json`:
 
 ```json5
 {
+  gateway: {
+    port: 18789,
+    bind: "loopback"
+  },
   plugins: {
     enabled: true,
+    allow: ["salute"],
     load: {
-      paths: ["/absolute/path/to/SaluteClaw/plugin"]
+      paths: ["/root/SaluteClaw/plugin"]
     },
     entries: {
       salute: {
@@ -43,9 +42,7 @@ Minimal runtime config target:
       enabled: true,
       accounts: {
         default: {
-          enabled: true,
-          webhookPath: "/salute/webhook",
-          publicBaseUrl: "https://your-public-domain.example"
+          webhookPath: "/salute/webhook"
         }
       }
     }
@@ -53,33 +50,44 @@ Minimal runtime config target:
 }
 ```
 
-## Runtime Expectations
-Once the plugin exists, the personal OpenClaw server should:
-- discover the plugin
-- load the `salute` channel
-- expose the configured webhook route
-- hand inbound Salute requests into the plugin runtime
+Notes:
+- `channels.salute.accounts.<id>.webhookPath` defaults to `/salute/webhook` if omitted.
+- Multiple accounts are supported; one webhook route is registered per account.
 
-## Development Notes
-For the PoC, manual restarts are acceptable after plugin changes.
+## 3) HTTPS Exposure
+Salute requires a public HTTPS endpoint.
 
-Keep the first version simple:
-- one default account
-- one webhook path
-- text-only responses
-- no advanced onboarding
+Recommended topology:
+- Nginx terminates TLS on `:443`
+- Nginx proxies `/salute/webhook` to `127.0.0.1:18789`
+- OpenClaw gateway stays loopback-bound
 
-## Validation Checklist
-The setup is good enough for PoC work when:
+Example public route:
 
-1. OpenClaw starts without plugin load errors.
-2. The `salute` plugin appears as enabled.
-3. The webhook route is reachable.
-4. A test request returns a valid JSON response.
+```text
+https://your-domain.example/salute/webhook
+```
 
-## Open Questions
-These still need to be confirmed against the personal server:
+## 4) Runtime Behavior to Expect
+After startup, the plugin should:
 
-1. Which local plugin loading workflow is simplest there?
-2. Does the server already sit behind a public HTTPS domain?
-3. Is a reverse proxy already in place for custom webhook routes?
+- register channel `salute`
+- register HTTP route(s) for configured account webhook paths
+- parse SmartApp requests and normalize them to envelope form
+- return immediate fast replies and queue background tool-enabled runs
+
+## 5) Validation
+Useful checks:
+
+1. Plugin inspection:
+   ```bash
+   openclaw plugins inspect salute --json
+   ```
+2. Webhook path responds with valid JSON for fixture payloads.
+3. `RUN_APP` returns greeting, `CLOSE_APP` returns goodbye.
+4. Consecutive messages show two-phase behavior (cached richer output appears on next turn when ready).
+
+## 6) Operational Notes
+- Restart OpenClaw after plugin source changes.
+- Keep secrets/tokens out of docs and VCS.
+- Non-fatal warnings about optional memory files can appear and do not block webhook handling.

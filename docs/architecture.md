@@ -1,202 +1,147 @@
 # SaluteClaw Architecture
 
-## Runtime Model
-The implementation lives in this repository, but the runtime host is the existing personal OpenClaw server.
+## Runtime Topology
+The integration runs as a local OpenClaw plugin loaded from this repository.
 
-Expected usage:
-- point OpenClaw `plugins.load.paths` at this repo's `plugin/` directory, or
-- install the local plugin from this repo into the personal server environment
-
-This allows all integration code to stay local to this repo while still using the existing server.
-
-## High-Level Flow
-```text
-User voice/text
-  -> Salute device
-  -> Salute Chat App
-  -> SmartApp API HTTPS request
-  -> personal OpenClaw server
-  -> salute plugin from this repo
-  -> OpenClaw runtime
-  -> Salute response mapper
-  -> SmartApp API response
-  -> Salute voice/screen output
+```mermaid
+flowchart LR
+  U[User voice or text] --> D[Salute device]
+  D --> A[Salute Chat App]
+  A -->|HTTPS POST| N[Nginx TLS reverse proxy :443]
+  N -->|proxy /salute/webhook| G[OpenClaw gateway 127.0.0.1:18789]
+  G --> P[salute plugin]
+  P --> R[OpenClaw runtime embedded Pi agent]
+  R --> M[Salute response mapper]
+  M --> A
+  A --> O[Voice and screen output]
 ```
 
-## Core Components
-### Salute SmartApp
-Responsibilities:
-- accept user voice or text input
-- send SmartApp API requests to the backend
-- render the returned voice and screen response
+## Two-Phase Message Lifecycle
+```mermaid
+sequenceDiagram
+  participant User
+  participant Salute as Salute Chat App
+  participant Webhook as salute webhook
+  participant Fast as Fast run disableTools=true
+  participant Bg as Background run disableTools=false
+  participant Cache
 
-### OpenClaw Server
-Responsibilities:
-- host the plugin runtime
-- provide the existing OpenClaw execution path
-- expose a reachable HTTPS endpoint for Salute traffic
+  User->>Salute: Message N
+  Salute->>Webhook: SmartApp API request
+  Webhook->>Cache: consumeCachedResult(session)
+  Webhook->>Fast: runEmbeddedPiAgent(timeout 12s)
+  Fast-->>Webhook: fast text
+  Webhook-->>Salute: immediate answer (<= timeout window)
+  Webhook->>Bg: start background run (timeout 120s)
+  Bg-->>Cache: store result for session
 
-### `salute` Plugin
-Responsibilities:
-- register a new OpenClaw channel
-- expose an inbound webhook route for Salute
-- parse SmartApp API payloads
-- normalize inbound requests into an OpenClaw-friendly message/session model
-- hand off requests to OpenClaw
-- map OpenClaw output back into Salute response JSON
-- return safe fallback responses on error
-
-## Plugin Structure
-Recommended initial shape:
-
-```text
-plugin/
-  package.json
-  openclaw.plugin.json
-  index.ts
-  src/
-    channel.ts
-    config.ts
-    webhook.ts
-    inbound.ts
-    outbound.ts
-    mapper.ts
-    types.ts
+  User->>Salute: Message N+1
+  Salute->>Webhook: next request
+  Webhook->>Cache: consumeCachedResult(session)
+  Cache-->>Webhook: richer previous-turn text (if ready)
+  Webhook->>Fast: run fast reply for current turn
+  Webhook-->>Salute: cached richer text + current fast text
 ```
 
-Suggested file roles:
-- `index.ts`: plugin entrypoint and registration
-- `channel.ts`: channel definition and OpenClaw registration
-- `config.ts`: config helpers and account resolution
-- `webhook.ts`: HTTP route handling
-- `inbound.ts`: parse and normalize Salute requests
-- `outbound.ts`: build Salute response payloads
-- `mapper.ts`: convert OpenClaw output into Salute-safe content
-- `types.ts`: shared payload and normalized types
+## Plugin Registration
+`plugin/index.ts` performs registration and route wiring:
 
-## Minimal Channel Shape
-Minimum viable behavior:
-- plugin id: `salute`
-- channel id: `salute`
-- register with `api.registerChannel({ plugin })`
-- config under `channels.salute.accounts.default`
-- one webhook endpoint
-- text-only I/O for the first version
+- registers channel via `api.registerChannel({ plugin: saluteChannel })`
+- stores runtime handle with `setRuntime(api.runtime)`
+- skips webhook route registration in non-full registration modes
+- enumerates account ids from config and registers one route per account
+- uses route auth mode `plugin` and exact path matching
 
-Recommended starting config:
+## Implemented Module Roles
+- `src/channel.ts` - channel metadata/capabilities and config helpers
+- `src/config.ts` - account listing, resolution, and inspect info
+- `src/webhook.ts` - request body parsing, dispatch, timeout wrapper, fallback responses
+- `src/inbound.ts` - messageName mapping into normalized envelope
+- `src/runtime.ts` - OpenClaw runtime handoff for fast and background agent runs
+- `src/cache.ts` - in-memory TTL cache for background results
+- `src/outbound.ts` - Salute response shape builders
+- `src/mapper.ts` - sanitization, null stripping, and text truncation
+- `src/types.ts` - Salute payload and plugin/runtime TypeScript interfaces
 
-```json5
-{
-  channels: {
-    salute: {
-      enabled: true,
-      accounts: {
-        default: {
-          enabled: true,
-          webhookPath: "/salute/webhook",
-          publicBaseUrl: "https://your-public-domain.example"
-        }
-      }
-    }
-  },
-  plugins: {
-    entries: {
-      salute: {
-        enabled: true
-      }
-    }
-  }
-}
-```
+## Inbound Processing
+`src/webhook.ts` handles multiple body shapes used by OpenClaw gateway and Node request wrappers:
 
-## Inbound Request Model
-The PoC only needs to recognize four categories:
-- `launch`
-- `message`
-- `action`
-- `close`
+- object, string, `Uint8Array`, serialized `Buffer` objects
+- nested fields (`body`, `payload`, `data`, `message`, etc.)
+- optional `req.json()` / `req.text()`
+- Node stream body via `data`/`end`
 
-Recommended normalized envelope:
+Then `src/inbound.ts` maps Salute message names:
 
-```ts
-type SaluteInboundEnvelope = {
-  accountId: string;
-  sessionId: string;
-  userId?: string;
-  chatId: string;
-  requestType: "launch" | "message" | "action" | "close";
-  text?: string;
-  actionId?: string;
-  rawRequest: unknown;
-};
-```
+- `RUN_APP` -> `launch`
+- `MESSAGE_TO_SKILL` -> `message`
+- `SERVER_ACTION` -> `action`
+- `CLOSE_APP` -> `close`
 
-The point of normalization is to isolate Salute-specific payload details from the rest of the integration.
-
-## Outbound Response Model
-The PoC should return:
-- one short spoken answer
-- optional display text
-- optional simple suggestions if easy to support
-
-Response rules:
-- keep output concise
-- avoid `null` values
-- drop unsupported fields
-- return deterministic fallback text on failure
-
-## UX Constraints
-The first version should optimize for voice-first behavior:
-- prefer short answers
-- prefer simple follow-up prompts
-- avoid long generated paragraphs
-- avoid screen-dependent flows
-- avoid assuming streaming responses
-
-If OpenClaw returns a long answer, the mapper should shorten or summarize it before returning it to Salute.
-
-## State Model
-For the PoC, keep session state minimal.
-
-Recommended keys:
+Normalized envelope fields:
 - `accountId`
 - `sessionId`
-- `userId` if available
+- `userId` (derived from `uuid.sub`/`uuid.userId`)
 - `chatId`
+- `requestType`
+- optional `text` / `actionId`
+- original raw request
 
-Advanced session recovery can wait until the first demo works end to end.
+## Request Handling Logic
+Webhook behavior by request type:
 
-## Error Handling
-The integration must always return valid SmartApp API JSON.
+- `launch`: returns greeting response with `auto_listening: true`
+- `close`: evicts session cache entry and returns goodbye response (`finished: true`)
+- `message` / `action`:
+  - if no text: asks user to repeat
+  - else: consumes cached background result (if present), gets fast runtime reply, optionally prepends cached text, returns answer
+  - starts a new background full-agent run for this turn
+- any unexpected failure: returns short safe fallback, logs details server-side
 
-Minimum fallback cases:
-- unsupported request type
-- empty user input
-- OpenClaw timeout
-- invalid OpenClaw response
-- internal exception
+Handler timeout for runtime call path is capped with `withTimeout(..., 15000)`.
 
-Expected behavior:
-- no raw stack traces
-- short retry-safe fallback messages
-- valid response shape even when OpenClaw fails
+## Two-Phase Runtime Model
+Implemented in `src/runtime.ts`:
 
-## Security Notes
-Baseline requirements for the PoC:
-- HTTPS endpoint
-- stable public URL
-- avoid unnecessary logging of raw user content
+- **Fast path (immediate response)**
+  - `timeoutMs: 12000`
+  - `disableTools: true`
+  - `bootstrapContextMode: "lightweight"`
+  - `fastMode: true`
+- **Background path (next-turn richer response)**
+  - `timeoutMs: 120000`
+  - `disableTools: false`
+  - `bootstrapContextMode: "full"`
+  - `fastMode: false`
 
-Possible future improvements:
-- request signature verification
-- stricter auth or allowlisting
-- stronger secret handling
+Both use provider/model profile:
 
-## Fallback Architecture
-If loading the plugin into the personal OpenClaw server proves awkward, use a thin adapter service in this repo:
+- provider: `openai-codex`
+- model: `gpt-5.3-codex-spark`
+- auth profile: `openai-codex:default`
 
-```text
-Salute -> adapter service -> personal OpenClaw server API -> adapter service -> Salute
-```
+## Background Result Cache
+`src/cache.ts` provides session-scoped in-memory caching:
 
-That is not the preferred architecture, but it is an acceptable fallback for a PoC demo.
+- cache key format: `salute:{accountId}:{sessionId}`
+- TTL: 10 minutes
+- eviction sweep: every 60 seconds
+- `storePendingRun()` tracks active background promise
+- `consumeCachedResult()` atomically returns and removes ready result
+- `evictSession()` clears entries on `CLOSE_APP`
+- newer pending runs replace older pending runs for same session key
+
+## Outbound Mapping Rules
+`src/outbound.ts` and `src/mapper.ts` enforce Salute-safe responses:
+
+- `messageName` set to `ANSWER_TO_USER`
+- spoken text sanitized and truncated to 1024 chars
+- bubble text truncated to 2048 chars
+- null/undefined fields removed before serialization
+- optional suggestions rendered as Salute text buttons with backend roundtrip
+- deterministic Russian fallback strings for errors and no-text cases
+
+## Constraints and Implications
+- SmartApp API flow is synchronous; no server push into active session
+- richer tool-enabled answer appears on next user turn
+- this trades some conversational immediacy for deterministic webhook latency

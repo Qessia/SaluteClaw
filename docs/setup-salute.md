@@ -1,69 +1,69 @@
-# Salute Setup Notes
+# Salute Setup
 
 ## Goal
-Create a Salute SmartApp that can send requests to the backend hosted by the personal OpenClaw server.
+Configure a Salute SmartApp that sends SmartApp API webhook requests to the OpenClaw-hosted `salute` plugin.
 
-## Recommended Project Type
-Use a Salute `Chat App` with scenario type `SmartApp API`.
+## 1) Create SmartApp
+In Salute Studio:
 
-This is the preferred PoC path because the SmartApp can forward requests directly to an external HTTPS backend.
-
-## Minimum Studio Setup
-Create a project and fill at least:
-- SmartApp name
+- project type: `Chat App`
 - scenario type: `SmartApp API`
-- external HTTPS URL
-- short description
-- full description if required
-- launch examples
-- testing instructions
+- webhook URL: public HTTPS endpoint for `/salute/webhook`
 
-Some catalog-oriented fields may still be required by Studio even for a test project.
-
-## External URL
-The external URL should point to the public webhook served by the personal OpenClaw server or its reverse proxy.
-
-Expected example:
+Example:
 
 ```text
-https://your-public-domain.example/salute/webhook
+https://your-domain.example/salute/webhook
 ```
 
-If Salute requires a dedicated domain shape, use a dedicated subdomain and route it internally to the plugin webhook.
+## 2) Request/Response Contract
+The plugin currently handles inbound message names:
 
-## PoC Interaction Model
-The first version should support:
-- app launch
-- one user message
-- a returned text answer
-- simple follow-up turns if they work naturally
+- `RUN_APP`
+- `MESSAGE_TO_SKILL`
+- `SERVER_ACTION`
+- `CLOSE_APP`
 
-The first version should avoid:
-- complex cards
-- media payloads
-- long answers
-- flows that require a screen
+The plugin responds with Salute-compatible JSON using:
 
-## SmartApp Testing Goals
-The Salute side is good enough for the PoC when:
+- `messageName: "ANSWER_TO_USER"`
+- `payload.pronounceText`
+- `payload.items[].bubble.text`
+- optional `payload.suggestions.buttons`
+- `auto_listening` and `finished` flags depending on flow stage
 
-1. The SmartApp launches successfully.
-2. Salute can send a request to the configured backend URL.
-3. The backend response renders as valid output.
-4. A user can complete one simple question-and-answer turn.
+## 3) UX Expectations
+Current behavior is voice-first and text-focused:
 
-## Payload Fixtures
-As implementation progresses, capture example payloads for:
-- launch
-- message
-- action
-- close
+- short spoken answers
+- optional bubble text mirror
+- optional simple text suggestion buttons
+- deterministic greeting, goodbye, and error fallbacks
 
-These should be stored in `fixtures/salute/` for local testing and mapping validation.
+Text is sanitized and truncated server-side for Salute safety.
 
-## Open Questions
-Still to confirm during implementation:
+## 4) Two-Phase Response Model (Important)
+Because SmartApp API webhook handling is synchronous and time-limited:
 
-1. Which Salute request fields are stable enough to use as session identifiers?
-2. What exact response shape is needed for the best voice-first result?
-3. Whether suggestion buttons are worth including in the first demo
+1. User turn gets a fast immediate answer.
+2. A richer tool-enabled agent run starts in background.
+3. On the next user turn, cached background result may appear before the new fast answer.
+
+This means richer results can be delayed by one message turn.
+
+## 5) Test Flow
+Use fixture payloads in `fixtures/salute/`:
+
+- `launch.json`
+- `message.json`
+- `action.json`
+- `close.json`
+
+Recommended manual checks in Salute:
+1. App launch returns greeting and keeps listening.
+2. Normal message returns fast answer within platform timeout.
+3. Next message can include prior cached richer result.
+4. Close request returns goodbye and ends the session.
+
+## 6) Known Platform Constraint
+Server-initiated push into the active SmartApp conversation is not available for this use case, so next-turn delivery is the chosen architecture for long-running tool-enabled answers.
