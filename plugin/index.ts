@@ -2,7 +2,7 @@ import type { PluginApi } from "./src/types.js";
 import { saluteChannel } from "./src/channel.js";
 import { resolveAccount } from "./src/config.js";
 import { createWebhookHandler } from "./src/webhook.js";
-import { setRuntime, handleMessage } from "./src/runtime.js";
+import { setRuntime } from "./src/runtime.js";
 
 export default function register(api: PluginApi) {
   api.registerChannel({ plugin: saluteChannel });
@@ -33,7 +33,7 @@ export default function register(api: PluginApi) {
 
     const handler = createWebhookHandler(accountId, {
       logger: api.logger,
-      handleMessage: api.runtime ? handleMessage : undefined,
+      runtimeAvailable: !!api.runtime,
     });
 
     api.registerHttpRoute({

@@ -1,4 +1,4 @@
-import type { SaluteRequest, SaluteInboundEnvelope, PluginLogger } from "./types.js";
+import type { SaluteRequest, PluginLogger } from "./types.js";
 import { parseRequest } from "./inbound.js";
 import {
   buildGreetingResponse,
@@ -11,14 +11,15 @@ import {
   consumeCachedResult,
   evictSession,
 } from "./cache.js";
-import { startBackgroundAgentRun } from "./runtime.js";
+import { runAgentWithDeadline, WEBHOOK_DEADLINE_MS } from "./runtime.js";
 
 interface WebhookDeps {
   logger: PluginLogger;
-  handleMessage?: (envelope: SaluteInboundEnvelope) => Promise<string | undefined>;
+  runtimeAvailable: boolean;
 }
 
-const REQUEST_TIMEOUT_MS = 15_000;
+const PENDING_TEXT = "Запрос обрабатывается.";
+const LAUNCH_PHRASE_RE = /^запусти\s/i;
 
 function looksLikeSaluteRequest(value: unknown): value is SaluteRequest {
   if (!value || typeof value !== "object") return false;
@@ -134,19 +135,6 @@ async function parseSaluteRequest(
   return null;
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error(`${label}: timed out after ${ms}ms`)),
-      ms,
-    );
-    promise.then(
-      (v) => { clearTimeout(timer); resolve(v); },
-      (e) => { clearTimeout(timer); reject(e); },
-    );
-  });
-}
-
 function formatError(err: unknown): string {
   if (err instanceof Error) {
     const stack = typeof err.stack === "string" ? err.stack : "";
@@ -201,49 +189,34 @@ export function createWebhookHandler(accountId: string, deps: WebhookDeps) {
         case "message":
         case "action": {
           const text = envelope.text;
-          if (!text) {
-            response = buildAnswerResponse(raw, "Пожалуйста, повторите ваш вопрос.", {
-              autoListening: true,
-            });
+          if (!text || LAUNCH_PHRASE_RE.test(text)) {
+            response = buildGreetingResponse(raw);
             break;
           }
 
           const key = cacheKey(accountId, envelope.sessionId);
-          const cached = consumeCachedResult(key);
+          const stale = consumeCachedResult(key);
 
-          if (deps.handleMessage) {
-            if (cached) {
-              deps.logger.info(
-                `[salute] delivering cached background result for ${key} (age ${Date.now() - cached.timestamp}ms)`,
-              );
-            }
+          let replyText: string;
 
-            const fastReply = await withTimeout(
-              deps.handleMessage(envelope),
-              REQUEST_TIMEOUT_MS,
-              `salute:handleMessage:${accountId}`,
+          if (deps.runtimeAvailable) {
+            const { text: agentText } = await runAgentWithDeadline(
+              envelope,
+              WEBHOOK_DEADLINE_MS,
             );
-
-            let replyText: string;
-            if (cached && fastReply) {
-              replyText = `${cached.text}\n\n---\n\n${fastReply}`;
-            } else if (cached) {
-              replyText = cached.text;
-            } else {
-              replyText = fastReply ?? "Не удалось получить ответ.";
-            }
-
-            response = buildAnswerResponse(raw, replyText, { autoListening: true });
-
-            startBackgroundAgentRun(envelope);
+            replyText = agentText ?? PENDING_TEXT;
           } else {
-            deps.logger.warn("[salute] handleMessage not wired — returning echo stub");
-            response = buildAnswerResponse(
-              raw,
-              `Вы сказали: «${text}». Интеграция с OpenClaw пока в разработке.`,
-              { autoListening: true },
-            );
+            replyText = PENDING_TEXT;
           }
+
+          if (stale) {
+            deps.logger.info(
+              `[salute] prepending stale result for ${key} (age ${Date.now() - stale.timestamp}ms)`,
+            );
+            replyText = `Ответ на предыдущий запрос:\n${stale.text}\n\n---\n\n${replyText}`;
+          }
+
+          response = buildAnswerResponse(raw, replyText, { autoListening: true });
           break;
         }
 
@@ -251,16 +224,10 @@ export function createWebhookHandler(accountId: string, deps: WebhookDeps) {
           response = buildErrorResponse(raw);
       }
     } catch (err) {
-      const isTimeout = err instanceof Error && err.message.includes("timed out");
-      const details = formatError(err);
-      deps.logger.error(
-        `[salute] handler error${isTimeout ? " (timeout)" : ""}: ${details}`,
-      );
+      deps.logger.error(`[salute] handler error: ${formatError(err)}`);
       response = buildAnswerResponse(
         raw,
-        isTimeout
-          ? "Извините, ответ занял слишком много времени. Попробуйте ещё раз."
-          : "Извините, произошла ошибка. Попробуйте ещё раз.",
+        "Извините, произошла ошибка. Попробуйте ещё раз.",
         { autoListening: true },
       );
     }

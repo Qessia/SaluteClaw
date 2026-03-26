@@ -16,31 +16,43 @@ flowchart LR
   A --> O[Voice and screen output]
 ```
 
-## Two-Phase Message Lifecycle
+## Wait-with-Deadline Message Lifecycle
 ```mermaid
 sequenceDiagram
   participant User
   participant Salute as Salute Chat App
   participant Webhook as salute webhook
-  participant Fast as Fast run disableTools=true
-  participant Bg as Background run disableTools=false
+  participant Agent as Agent run
   participant Cache
 
-  User->>Salute: Message N
+  Note over Webhook: Case 1 - agent finishes within 5s deadline
+  User->>Salute: "Какая погода в Москве сейчас?"
   Salute->>Webhook: SmartApp API request
   Webhook->>Cache: consumeCachedResult(session)
-  Webhook->>Fast: runEmbeddedPiAgent(timeout 12s)
-  Fast-->>Webhook: fast text
-  Webhook-->>Salute: immediate answer (<= timeout window)
-  Webhook->>Bg: start background run (timeout 120s)
-  Bg-->>Cache: store result for session
+  Cache-->>Webhook: (empty)
+  Webhook->>Agent: runAgentWithDeadline(5s)
+  Agent-->>Webhook: "Сейчас в Москве около +6 и облачно." (3s)
+  Webhook-->>Salute: "Сейчас в Москве около +6 и облачно."
 
-  User->>Salute: Message N+1
-  Salute->>Webhook: next request
+  Note over Webhook: Case 2 - agent exceeds 5s deadline
+  User->>Salute: "Скачай iris.csv и отправь статистику"
+  Salute->>Webhook: SmartApp API request
   Webhook->>Cache: consumeCachedResult(session)
-  Cache-->>Webhook: richer previous-turn text (if ready)
-  Webhook->>Fast: run fast reply for current turn
-  Webhook-->>Salute: cached richer text + current fast text
+  Cache-->>Webhook: (empty)
+  Webhook->>Agent: runAgentWithDeadline(5s)
+  Note over Agent: deadline fires at 5s, run continues
+  Webhook-->>Salute: "Запрос обрабатывается."
+  Webhook->>Cache: storePendingRun(promise)
+  Agent-->>Cache: result lands later (45s)
+
+  Note over Webhook: Case 3 - stale result delivered labeled
+  User->>Salute: "Ну как?"
+  Salute->>Webhook: SmartApp API request
+  Webhook->>Cache: consumeCachedResult(session)
+  Cache-->>Webhook: iris.csv result from previous turn
+  Webhook->>Agent: runAgentWithDeadline(5s)
+  Agent-->>Webhook: reply to "Ну как?" (2s)
+  Webhook-->>Salute: "Ответ на предыдущий запрос: ... --- current reply"
 ```
 
 ## Plugin Registration
@@ -55,9 +67,9 @@ sequenceDiagram
 ## Implemented Module Roles
 - `src/channel.ts` - channel metadata/capabilities and config helpers
 - `src/config.ts` - account listing, resolution, and inspect info
-- `src/webhook.ts` - request body parsing, dispatch, timeout wrapper, fallback responses
+- `src/webhook.ts` - request body parsing, dispatch, wait-with-deadline orchestration, fallback responses
 - `src/inbound.ts` - messageName mapping into normalized envelope
-- `src/runtime.ts` - OpenClaw runtime handoff for fast and background agent runs
+- `src/runtime.ts` - OpenClaw runtime handoff with deadline race and background caching
 - `src/cache.ts` - in-memory TTL cache for background results
 - `src/outbound.ts` - Salute response shape builders
 - `src/mapper.ts` - sanitization, null stripping, and text truncation
@@ -94,31 +106,29 @@ Webhook behavior by request type:
 - `close`: evicts session cache entry and returns goodbye response (`finished: true`)
 - `message` / `action`:
   - if no text: asks user to repeat
-  - else: consumes cached background result (if present), gets fast runtime reply, optionally prepends cached text, returns answer
-  - starts a new background full-agent run for this turn
+  - else:
+    1. consume any stale cached result from a previous turn
+    2. start agent run and race it against a 5-second deadline
+    3. if agent finishes within deadline: use its text as the reply
+    4. if deadline fires first: reply with "Запрос обрабатывается.", stash the still-running promise in cache for next turn
+    5. if a stale result was consumed in step 1, prepend it labeled ("Ответ на предыдущий запрос: ...")
 - any unexpected failure: returns short safe fallback, logs details server-side
 
-Handler timeout for runtime call path is capped with `withTimeout(..., 15000)`.
+## Agent Run with Deadline
+Implemented in `src/runtime.ts` via `runAgentWithDeadline()`:
 
-## Two-Phase Runtime Model
-Implemented in `src/runtime.ts`:
+- starts `runEmbeddedPiAgent` with full tool access
+- races the agent promise against a `WEBHOOK_DEADLINE_MS` (5s) timer
+- if agent wins: returns `{ text, timedOut: false }`
+- if deadline wins: stores the still-running promise in cache via `storePendingRun`, returns `{ text: undefined, timedOut: true }`
 
-- **Fast path (immediate response)**
-  - `timeoutMs: 12000`
-  - `disableTools: true`
-  - `bootstrapContextMode: "lightweight"`
-  - `fastMode: true`
-- **Background path (next-turn richer response)**
-  - `timeoutMs: 120000`
-  - `disableTools: false`
-  - `bootstrapContextMode: "full"`
-  - `fastMode: false`
+Agent parameters:
 
-Both use provider/model profile:
-
-- provider: `openai-codex`
-- model: `gpt-5.3-codex-spark`
-- auth profile: `openai-codex:default`
+- `timeoutMs: 120000`
+- `disableTools: false`
+- `bootstrapContextMode: "full"`
+- `fastMode: false`
+- provider: `openai-codex`, model: `gpt-5.3-codex-spark`, auth: `openai-codex:default`
 
 ## Background Result Cache
 `src/cache.ts` provides session-scoped in-memory caching:
@@ -126,10 +136,9 @@ Both use provider/model profile:
 - cache key format: `salute:{accountId}:{sessionId}`
 - TTL: 10 minutes
 - eviction sweep: every 60 seconds
-- `storePendingRun()` tracks active background promise
-- `consumeCachedResult()` atomically returns and removes ready result
+- `storePendingRun()` tracks a background promise; skips store if one is already in-flight (no replacement)
+- `consumeCachedResult()` atomically returns and removes a ready result
 - `evictSession()` clears entries on `CLOSE_APP`
-- newer pending runs replace older pending runs for same session key
 
 ## Outbound Mapping Rules
 `src/outbound.ts` and `src/mapper.ts` enforce Salute-safe responses:
@@ -143,5 +152,6 @@ Both use provider/model profile:
 
 ## Constraints and Implications
 - SmartApp API flow is synchronous; no server push into active session
-- richer tool-enabled answer appears on next user turn
-- this trades some conversational immediacy for deterministic webhook latency
+- most agent runs complete within the 5s deadline and are returned on the same turn
+- long-running tool-enabled runs that exceed the deadline are deferred to the next turn, with the stale result clearly labeled
+- in-flight background runs are never replaced — a new message's run is discarded from caching if one is already pending

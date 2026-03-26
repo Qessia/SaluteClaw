@@ -10,7 +10,7 @@ import {
   sanitizeText,
 } from "./mapper.js";
 
-const GREETING = "Привет! Я помощник OpenClaw. Задайте мне вопрос.";
+const GREETING = "Крабовый привет!";
 const FALLBACK = "Извините, произошла ошибка. Попробуйте ещё раз.";
 const GOODBYE = "До свидания!";
 

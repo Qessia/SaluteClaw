@@ -71,6 +71,8 @@ export function storePendingRun(
   ensureEvictionTimer();
 
   const existing = store.get(key);
+  if (existing?.pending) return;
+
   const entry: CacheEntry = {
     result: existing?.result ?? null,
     pending: promise,

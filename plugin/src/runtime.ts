@@ -18,78 +18,49 @@ export function getRuntime(): PluginRuntime | null {
 }
 
 // ---------------------------------------------------------------------------
-// OpenClaw handoff — LLM-only fast mode + background full-agent mode
+// OpenClaw handoff — agent run with webhook-safe deadline
 // ---------------------------------------------------------------------------
 
-const FAST_TIMEOUT_MS = 12_000;
 const BACKGROUND_TIMEOUT_MS = 120_000;
 const DEFAULT_PROVIDER = "openai-codex";
 const DEFAULT_MODEL = "gpt-5.3-codex-spark";
 const DEFAULT_AUTH_PROFILE = "openai-codex:default";
 
-const SALUTE_SYSTEM_PROMPT = `Ты — SaluteClaw, полезный AI-ассистент, интегрированный в экосистему Салют.
-Отвечай кратко и по делу (1–3 предложения), потому что ответ будет озвучен голосом.
-Если пользователь пишет на другом языке, отвечай на его языке.`;
+export const WEBHOOK_DEADLINE_MS = 5_000;
 
-const SALUTE_FULL_SYSTEM_PROMPT = `Ты — SaluteClaw, полезный AI-ассистент с доступом к инструментам, интегрированный в экосистему Салют.
+const SALUTE_SYSTEM_PROMPT = `Ты — SaluteClaw, полезный AI-ассистент с доступом к инструментам, интегрированный в экосистему Салют.
 Используй инструменты, если они нужны для ответа. Дай подробный, но структурированный ответ.
 Если пользователь пишет на другом языке, отвечай на его языке.`;
 
-/**
- * Fast LLM-only response for immediate webhook reply (disableTools: true).
- */
-export async function handleMessage(
-  envelope: SaluteInboundEnvelope,
-): Promise<string | undefined> {
-  if (!runtime) return undefined;
-  if (!envelope.text) return undefined;
-
-  const sessionKey = `salute:${envelope.accountId}:${envelope.sessionId}`;
-
-  const cfg = await runtime.config.loadConfig();
-  await runtime.agent.ensureAgentWorkspace(cfg);
-
-  const agentDir = runtime.agent.resolveAgentDir(cfg);
-  const workspaceDir = runtime.agent.resolveAgentWorkspaceDir(cfg);
-  const sessionFile = path.join(agentDir, "sessions", `${safeKey(sessionKey)}.jsonl`);
-
-  const result = await runtime.agent.runEmbeddedPiAgent({
-    sessionId: sessionKey,
-    runId: randomUUID(),
-    sessionFile,
-    workspaceDir,
-    prompt: envelope.text,
-    timeoutMs: FAST_TIMEOUT_MS,
-    provider: DEFAULT_PROVIDER,
-    model: DEFAULT_MODEL,
-    authProfileId: DEFAULT_AUTH_PROFILE,
-    fastMode: true,
-    disableTools: true,
-    bootstrapContextMode: "lightweight",
-    extraSystemPrompt: SALUTE_SYSTEM_PROMPT,
-  });
-
-  const direct = pickTextResult(result);
-  if (direct) return direct;
-
-  return undefined;
-}
+const DEADLINE_SENTINEL = Symbol("deadline");
 
 /**
- * Fire-and-forget: starts a full agent run (disableTools: false) in the
- * background and stores the promise in the session cache so the *next*
- * webhook hit can deliver the richer answer.
+ * Start an agent run and race it against a deadline.
+ * - If the run finishes within `deadlineMs`, return the text directly.
+ * - If the deadline fires first, stash the still-running promise in the
+ *   session cache so the next webhook hit can deliver the result.
  */
-export function startBackgroundAgentRun(
+export async function runAgentWithDeadline(
   envelope: SaluteInboundEnvelope,
-): void {
-  if (!runtime) return;
-  if (!envelope.text) return;
+  deadlineMs: number,
+): Promise<{ text: string | undefined; timedOut: boolean }> {
+  if (!runtime || !envelope.text) return { text: undefined, timedOut: false };
 
-  const key = cacheKey(envelope.accountId, envelope.sessionId);
+  const agentPromise = runFullAgent(envelope).catch(() => undefined);
 
-  const promise = runFullAgent(envelope).catch(() => undefined);
-  storePendingRun(key, promise);
+  const timer = new Promise<typeof DEADLINE_SENTINEL>((resolve) =>
+    setTimeout(() => resolve(DEADLINE_SENTINEL), deadlineMs),
+  );
+
+  const winner = await Promise.race([agentPromise, timer]);
+
+  if (winner === DEADLINE_SENTINEL) {
+    const key = cacheKey(envelope.accountId, envelope.sessionId);
+    storePendingRun(key, agentPromise);
+    return { text: undefined, timedOut: true };
+  }
+
+  return { text: winner as string | undefined, timedOut: false };
 }
 
 async function runFullAgent(
@@ -119,7 +90,7 @@ async function runFullAgent(
     fastMode: false,
     disableTools: false,
     bootstrapContextMode: "full",
-    extraSystemPrompt: SALUTE_FULL_SYSTEM_PROMPT,
+    extraSystemPrompt: SALUTE_SYSTEM_PROMPT,
   });
 
   return pickTextResult(result);
